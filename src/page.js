@@ -29,11 +29,19 @@ export const PAGE = `<!doctype html>
   #btn-in { background: var(--in); }
   #btn-out { background: var(--out); }
   .btn-sub { display: inline-block; text-decoration: none; white-space: nowrap; color: var(--muted);
-             font-size: 14px; font-weight: 500; padding: 6px 10px; border: 1px solid var(--line);
-             border-radius: 8px; }
+             font: inherit; font-size: 14px; font-weight: 500; padding: 6px 10px; border: 1px solid var(--line);
+             border-radius: 8px; background: none; cursor: pointer; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-  input[type=month] { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line);
+  input { font: inherit; }
+  input[type=month] { padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line);
                       background: var(--card); color: var(--text); }
+  .auth input[type=email], .auth input[type=password] { width: 100%; padding: 12px; border-radius: 8px;
+      border: 1px solid var(--line); background: var(--card); color: var(--text); font-size: 16px; margin-bottom: 12px; }
+  .auth button.primary { width: 100%; background: var(--in); }
+  .auth .switch { display: block; margin: 14px auto 0; background: none; color: var(--in); font-size: 14px;
+                  font-weight: 500; padding: 6px; }
+  .auth-title { text-align: center; margin: 0 0 16px; font-weight: 600; }
+  .hint { color: var(--muted); font-size: 13px; margin: -6px 0 12px; }
   .total { font-size: 18px; font-weight: 600; }
   table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
   th, td { text-align: left; padding: 10px 6px; border-bottom: 1px solid var(--line); }
@@ -49,33 +57,47 @@ export const PAGE = `<!doctype html>
 <main>
   <div class="header">
     <h1>勤怠記録</h1>
-    <div class="row">
+    <div class="row" id="userbar" hidden>
       <span class="me" id="me"></span>
-      <a class="btn-sub" href="/cdn-cgi/access/logout">ログアウト</a>
+      <button class="btn-sub" id="btn-logout">ログアウト</button>
     </div>
   </div>
 
-  <section class="card">
-    <p class="clock" id="clock">--:--:--</p>
-    <p class="status" id="status">読み込み中…</p>
-    <div class="buttons">
-      <button id="btn-in" disabled>出勤</button>
-      <button id="btn-out" disabled>退勤</button>
-    </div>
-    <div class="err" id="err"></div>
+  <section class="card auth" id="auth" hidden>
+    <p class="auth-title" id="auth-title">ログイン</p>
+    <form id="auth-form">
+      <input type="email" id="auth-email" autocomplete="username" required placeholder="メールアドレス">
+      <input type="password" id="auth-pw" autocomplete="current-password" required placeholder="パスワード">
+      <p class="hint" id="auth-hint" hidden>8 文字以上で入力してください</p>
+      <button type="submit" class="primary" id="auth-submit">ログイン</button>
+    </form>
+    <button class="switch" id="auth-switch">アカウントを作成する</button>
+    <div class="err" id="auth-err"></div>
   </section>
 
-  <section class="card">
-    <div class="row">
-      <input type="month" id="month">
-      <div class="total">合計 <span id="total">0:00</span></div>
-    </div>
-    <table>
-      <thead><tr><th>日付</th><th>出勤</th><th>退勤</th><th class="num">実働</th><th></th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-    <div class="empty" id="empty" hidden>記録がありません</div>
-  </section>
+  <div id="app" hidden>
+    <section class="card">
+      <p class="clock" id="clock">--:--:--</p>
+      <p class="status" id="status">読み込み中…</p>
+      <div class="buttons">
+        <button id="btn-in" disabled>出勤</button>
+        <button id="btn-out" disabled>退勤</button>
+      </div>
+      <div class="err" id="err"></div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <input type="month" id="month">
+        <div class="total">合計 <span id="total">0:00</span></div>
+      </div>
+      <table>
+        <thead><tr><th>日付</th><th>出勤</th><th>退勤</th><th class="num">実働</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="empty" id="empty" hidden>記録がありません</div>
+    </section>
+  </div>
 </main>
 
 <script>
@@ -102,15 +124,70 @@ function showErr(msg) { $('err').textContent = msg || ''; }
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { 'content-type': 'application/json' }, ...opts });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || ('エラー (' + res.status + ')'));
+  if (!res.ok) {
+    const e = new Error(body.error || ('エラー (' + res.status + ')'));
+    e.status = res.status;
+    throw e;
+  }
   return body;
 }
 
-async function loadMe() {
-  const me = await api('/api/me');
-  $('me').textContent = me.email;
+// ---- 認証画面 ----
+let authMode = 'login';
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const isRegister = mode === 'register';
+  $('auth-title').textContent = isRegister ? 'アカウントを作成' : 'ログイン';
+  $('auth-submit').textContent = isRegister ? '作成して始める' : 'ログイン';
+  $('auth-switch').textContent = isRegister ? 'すでにアカウントがある場合はログイン' : 'アカウントを作成する';
+  $('auth-pw').autocomplete = isRegister ? 'new-password' : 'current-password';
+  $('auth-hint').hidden = !isRegister;
+  $('auth-err').textContent = '';
 }
 
+function showAuth() {
+  $('app').hidden = true;
+  $('userbar').hidden = true;
+  $('auth').hidden = false;
+  $('auth-pw').value = '';
+  setAuthMode('login');
+  $('auth-email').focus();
+}
+
+function showApp(email) {
+  $('auth').hidden = true;
+  $('me').textContent = email;
+  $('userbar').hidden = false;
+  $('app').hidden = false;
+}
+
+$('auth-switch').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
+
+$('auth-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  $('auth-err').textContent = '';
+  $('auth-submit').disabled = true;
+  try {
+    const path = authMode === 'register' ? '/api/register' : '/api/login';
+    const body = { email: $('auth-email').value, password: $('auth-pw').value };
+    const res = await api(path, { method: 'POST', body: JSON.stringify(body) });
+    $('auth-pw').value = '';
+    showApp(res.email);
+    await refresh();
+  } catch (err) {
+    $('auth-err').textContent = err.message;
+  } finally {
+    $('auth-submit').disabled = false;
+  }
+});
+
+$('btn-logout').addEventListener('click', async () => {
+  try { await api('/api/logout', { method: 'POST' }); } catch (e) { /* 無視してログイン画面へ */ }
+  showAuth();
+});
+
+// ---- 勤怠 ----
 async function loadStatus() {
   const status = await api('/api/status');
   $('btn-in').disabled = status.working;
@@ -157,10 +234,10 @@ async function clock(kind) {
 
 async function refresh() {
   try {
-    await loadMe();
     await loadStatus();
     await loadRecords();
   } catch (e) {
+    if (e.status === 401) { showAuth(); return; }
     showErr(e.message);
   }
 }
@@ -180,10 +257,20 @@ $('rows').addEventListener('click', async (e) => {
   }
 });
 
-$('month').value = nowJstMonth();
-setInterval(() => { $('clock').textContent = fmtClock.format(new Date()); }, 1000);
-$('clock').textContent = fmtClock.format(new Date());
-refresh();
+// 起動時：ログイン済みか確認
+async function start() {
+  $('month').value = nowJstMonth();
+  setInterval(() => { $('clock').textContent = fmtClock.format(new Date()); }, 1000);
+  $('clock').textContent = fmtClock.format(new Date());
+  try {
+    const me = await api('/api/me');
+    showApp(me.email);
+    await refresh();
+  } catch (e) {
+    showAuth();
+  }
+}
+start();
 </script>
 </body>
 </html>`;

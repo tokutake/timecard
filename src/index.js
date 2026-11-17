@@ -1,9 +1,21 @@
 import { PAGE } from './page.js';
-import { currentEmail } from './auth.js';
+import {
+  LOCK_MINUTES,
+  MAX_FAILURES,
+  SESSION_MAX_AGE,
+  cookieFor,
+  createSession,
+  deleteSession,
+  hashPassword,
+  userFromRequest,
+  verifyPassword,
+} from './auth.js';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8' };
-const json = (data, status = 200) =>
-  new Response(JSON.stringify(data), { status, headers: JSON_HEADERS });
+const json = (data, status = 200, headers = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...headers } });
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // 日本時間(JST = UTC+9)の月初・翌月初を UTC の ISO 文字列で返す
 function monthRange(month) {
@@ -18,15 +30,12 @@ function monthRange(month) {
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
-// 初回アクセス時に利用者を登録し、users.id を返す
-async function ensureUser(db, email) {
-  const row = await db
-    .prepare(
-      'INSERT INTO users (email, created_at) VALUES (?, ?) ON CONFLICT(email) DO UPDATE SET email = excluded.email RETURNING id'
-    )
-    .bind(email, new Date().toISOString())
-    .first();
-  return row.id;
+async function readJson(request) {
+  try {
+    return await request.json();
+  } catch {
+    return null;
+  }
 }
 
 async function getOpenRecord(db, userId) {
@@ -38,6 +47,7 @@ async function getOpenRecord(db, userId) {
     .first();
 }
 
+// ログイン後に使う API
 async function handleApi(request, env, url, user) {
   const { pathname } = url;
   const method = request.method;
@@ -107,6 +117,79 @@ async function handleApi(request, env, url, user) {
   return json({ error: 'Not Found' }, 404);
 }
 
+async function handleRegister(request, env) {
+  const body = await readJson(request);
+  if (!body) return json({ error: 'リクエストが不正です' }, 400);
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = body.password;
+
+  if (email.length > 254 || !EMAIL_RE.test(email)) {
+    return json({ error: 'メールアドレスの形式が正しくありません' }, 400);
+  }
+  if (typeof password !== 'string' || password.length < 8 || password.length > 128) {
+    return json({ error: 'パスワードは 8 文字以上 128 文字以下にしてください' }, 400);
+  }
+
+  const existing = await env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first();
+  if (existing) {
+    return json({ error: 'このメールアドレスは登録済みです' }, 409);
+  }
+
+  const hash = await hashPassword(password);
+  const row = await env.DB
+    .prepare('INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?) RETURNING id')
+    .bind(email, hash, new Date().toISOString())
+    .first();
+
+  const token = await createSession(env.DB, row.id);
+  return json({ ok: true, email }, 201, {
+    'Set-Cookie': cookieFor(request, token, SESSION_MAX_AGE),
+  });
+}
+
+async function handleLogin(request, env) {
+  const body = await readJson(request);
+  if (!body) return json({ error: 'リクエストが不正です' }, 400);
+  const email = String(body.email ?? '').trim().toLowerCase();
+  const password = typeof body.password === 'string' ? body.password : '';
+  const db = env.DB;
+  const now = new Date();
+
+  const user = await db
+    .prepare('SELECT id, email, password_hash, failed_count, locked_until FROM users WHERE email = ?')
+    .bind(email)
+    .first();
+
+  if (user?.locked_until && user.locked_until > now.toISOString()) {
+    return json({ error: '試行回数が多すぎます。しばらくしてから再度お試しください' }, 429);
+  }
+
+  const ok = await verifyPassword(password, user?.password_hash ?? null);
+  if (!user || !ok) {
+    if (user) {
+      const failures = user.failed_count + 1;
+      const locked =
+        failures >= MAX_FAILURES
+          ? new Date(now.getTime() + LOCK_MINUTES * 60 * 1000).toISOString()
+          : null;
+      await db
+        .prepare('UPDATE users SET failed_count = ?, locked_until = ? WHERE id = ?')
+        .bind(failures >= MAX_FAILURES ? 0 : failures, locked, user.id)
+        .run();
+    }
+    return json({ error: 'メールアドレスまたはパスワードが違います' }, 401);
+  }
+
+  await db
+    .prepare('UPDATE users SET failed_count = 0, locked_until = NULL WHERE id = ?')
+    .bind(user.id)
+    .run();
+  const token = await createSession(db, user.id);
+  return json({ ok: true, email: user.email }, 200, {
+    'Set-Cookie': cookieFor(request, token, SESSION_MAX_AGE),
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -114,20 +197,31 @@ export default {
     const method = request.method;
 
     try {
-      // 画面本体は公開（データは含まない）。ログインは Cloudflare Access が担当する
       if (pathname === '/' && method === 'GET') {
         return new Response(PAGE, {
           headers: { 'content-type': 'text/html; charset=utf-8' },
         });
       }
 
+      if (pathname === '/api/register' && method === 'POST') {
+        return await handleRegister(request, env);
+      }
+
+      if (pathname === '/api/login' && method === 'POST') {
+        return await handleLogin(request, env);
+      }
+
+      if (pathname === '/api/logout' && method === 'POST') {
+        await deleteSession(request, env.DB);
+        return json({ ok: true }, 200, { 'Set-Cookie': cookieFor(request, '', 0) });
+      }
+
       if (pathname.startsWith('/api/')) {
-        const email = await currentEmail(request, env);
-        if (!email) {
+        const user = await userFromRequest(request, env.DB);
+        if (!user) {
           return json({ error: 'ログインが必要です' }, 401);
         }
-        const id = await ensureUser(env.DB, email);
-        return await handleApi(request, env, url, { id, email });
+        return await handleApi(request, env, url, user);
       }
 
       return new Response('Not Found', { status: 404 });

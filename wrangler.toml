@@ -5,12 +5,5 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "timecard"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "8217aae2-0571-40cd-be30-6fe2d4e0e708"
 migrations_dir = "migrations"
-
-# Cloudflare Access の設定（公開情報なので secret ではない）
-# CF_ACCESS_TEAM_DOMAIN: 例 "your-team.cloudflareaccess.com"
-# CF_ACCESS_AUD: Access アプリの Application Audience (AUD) タグ
-[vars]
-CF_ACCESS_TEAM_DOMAIN = "REPLACE_WITH_YOUR_TEAM.cloudflareaccess.com"
-CF_ACCESS_AUD = "REPLACE_WITH_ACCESS_APP_AUD"
